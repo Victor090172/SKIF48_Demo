@@ -307,21 +307,27 @@ def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
 # ---------------------------------------------------------------------------
 # Календарь
 # ---------------------------------------------------------------------------
-def dt_picker(label: str, dmin: datetime, dmax: datetime, default: datetime, key: str) -> datetime:
+def dt_picker(label: str, dmin: datetime, dmax: datetime, key: str) -> datetime:
     """Граница периода: календарь + выбор времени двумя полями.
 
-    Отдельного st.datetime_input в Streamlit 1.51 нет, а пара
-    date_input + time_input — это ровно тот «традиционный календарь», который
-    и нужен: дата выбирается стрелками, время — списком.
+    Отдельного st.datetime_input в этой ветке Streamlit нет, а пара
+    date_input + time_input — это ровно тот «традиционный календарь»,
+    который и нужен: дата выбирается стрелками, время — списком.
+
+    ВНИМАНИЕ, из-за чего ломалось на хостинге: значение виджета НЕ задаётся
+    через `value=`. Оно живёт только в st.session_state, а виджет создаётся
+    без value. Одновременная передача value= и ключа, уже присутствующего в
+    session_state, на свежих версиях Streamlit поднимает StreamlitValueError.
+    Локально на 1.51 это проходило, на хостинге — нет.
     """
     col_d, col_t = st.columns([1, 1], gap="small")
     d = col_d.date_input(
-        f"{label} · дата", value=default.date(),
+        f"{label} · дата",
         min_value=dmin.date(), max_value=dmax.date(),
         format="DD.MM/YYYY", key=f"{key}_date",
     )
     t = col_t.time_input(
-        f"{label} · время", value=default.time(),
+        f"{label} · время",
         step=timedelta(minutes=1), key=f"{key}_time",
     )
     return datetime.combine(d, t)
@@ -372,8 +378,11 @@ def main() -> None:
                      ("to_date", d_hi.date()), ("to_time", d_hi.time())):
             st.session_state.setdefault(k, v)
 
-        sel_from = dt_picker("С", d_lo, d_hi, d_lo, "from")
-        sel_to = dt_picker("По", d_lo, d_hi, d_hi, "to")
+        # Начальные значения кладём в session_state, а виджеты создаём без
+        # value= — тогда источник значения ровно один, и версия Streamlit
+        # ни при чём не мешает.
+        sel_from = dt_picker("С", d_lo, d_hi, "from")
+        sel_to = dt_picker("По", d_lo, d_hi, "to")
 
         if sel_from > sel_to:
             st.error("Начало периода позже конца — поменяйте границы.")
