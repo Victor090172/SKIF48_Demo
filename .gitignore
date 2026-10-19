@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# Инструменты
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Данные: в репозитории лежит только telemetry_skif48.csv.
+# Исходные выгрузки и их производные — большие и потенциально чувствительные,
+# держим их вне репозитория.
+data/*.xlsx
+data/*.xls
+data/*_raw.csv
