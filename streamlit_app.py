@@ -333,7 +333,13 @@ def dt_picker(label: str, dmin: datetime, dmax: datetime, default: datetime, key
 def main() -> None:
     # Сайдбар по умолчанию тесноват: обрезались календари, а кириллица в
     # кнопках быстрого выбора распадалась на буквы по вертикали.
-    st.markdown(
+    #
+    # Именно st.html, а не st.markdown(unsafe_allow_html=True): st.markdown
+    # прогоняет содержимое через санитайзер и подмешивает узлы в дерево,
+    # которым React управляет сам. На хостинге это давало падение фронтенда
+    # «NotFoundError: removeChild ... узел не является дочерним». st.html —
+    # штатный способ внедрять HTML, он с этим не сталкивается.
+    st.html(
         """
         <style>
           [data-testid="stSidebar"] { min-width: 380px; max-width: 380px; }
@@ -341,8 +347,7 @@ def main() -> None:
           [data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.35rem; }
           [data-testid="stSidebar"] [data-baseweb="input"] { font-size: 0.8rem; }
         </style>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
     st.title("СКИФ-48 · телеметрия сева")
