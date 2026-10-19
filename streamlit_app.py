@@ -324,7 +324,7 @@ def dt_picker(label: str, dmin: datetime, dmax: datetime, key: str) -> datetime:
     d = col_d.date_input(
         f"{label} · дата",
         min_value=dmin.date(), max_value=dmax.date(),
-        format="DD.MM/YYYY", key=f"{key}_date",
+        format="DD.MM.YYYY", key=f"{key}_date",
     )
     t = col_t.time_input(
         f"{label} · время",
