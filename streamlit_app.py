@@ -80,6 +80,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import colorsys
 import folium
 import numpy as np
 import pandas as pd
@@ -102,6 +103,28 @@ DEFAULT_RED_BELOW = 80.0
 # Цвета сегментов трека
 COLOR_OK = "#1a9850"    # зелёный — движение без забития
 COLOR_BAD = "#d73027"   # красный — движение с забитыми сошниками
+
+# Шкала одновременно забитых сошников. Флагов 221…224 — 32 штуки, по одному
+# на каждый сошник машины, поэтому счётчик идёт от 1 до 32.
+BLOCK_SCALE_MAX = 32
+
+
+def block_color(n: int) -> str:
+    """Цвет сегмента трека по числу одновременно забитых сошников.
+
+    Один забитый сошник — жёлтый, дальше через оранжевый к чистому красному
+    на максимуме шкалы (там цвет совпадает с прежним COLOR_BAD, так что
+    худший участок выглядит как раньше). Цвета интерполируются в HSL по
+    каналу оттенка (48° → 3°), а не в RGB: середина шкалы даёт именно
+    оранжевый, тогда как линейное смешивание красного с жёлтым в RGB даёт
+    грязно-коричневый.
+    """
+    t = (min(max(n, 1), BLOCK_SCALE_MAX) - 1) / (BLOCK_SCALE_MAX - 1)
+    h = (48.0 + (3.0 - 48.0) * t) / 360.0       # жёлтый -> красный
+    s = (100.0 + (68.0 - 100.0) * t) / 100.0    # яркость красного чуть ниже
+    l = (45.0 + (50.0 - 45.0) * t) / 100.0
+    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
 
 # Три уровня показателя: (цвет рамки, заливка, подпись)
 LEVEL_STYLE = {
@@ -246,7 +269,7 @@ def card_row(*cards: str) -> str:
 # Карта
 # ---------------------------------------------------------------------------
 def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
-    """Карта с треком: зелёный — без забития, красный — с забитыми сошниками."""
+    """Карта с треком: зелёный — без забития, дальше жёлтый → красный."""
     center = [float(d["lat"].mean()), float(d["lon"].mean())]
     fmap = folium.Map(location=center, zoom_start=14, tiles="OpenStreetMap",
                       control_scale=True)
@@ -256,7 +279,9 @@ def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
 
     lat = d["lat"].to_numpy()
     lon = d["lon"].to_numpy()
-    blocked = d["blocked"].to_numpy()
+    # Число одновременно забитых сошников: пофакторные флаги 221…224 дают
+    # целые 0…4. От него зависит цвет сегмента.
+    n_blk = d["n_blocked"].to_numpy().astype(int)
 
     # Прореживание: оставляем точку, только если она ушла от последней
     # сохранённой дальше чем на simplify_m. Геометрия трека не меняется.
@@ -268,9 +293,9 @@ def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
         keep[-1] = True
 
     idx = np.flatnonzero(keep)
-    slat, slon, sblk = lat[idx], lon[idx], blocked[idx]
+    slat, slon, snb = lat[idx], lon[idx], n_blk[idx]
 
-    seg = sblk[1:]  # цвет сегмента определяется его концом
+    seg = snb[1:]  # цвет сегмента определяется его концом
     if len(seg) == 0:
         return fmap
 
@@ -281,12 +306,13 @@ def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
         pts = list(zip(slat[start:stop + 1].tolist(), slon[start:stop + 1].tolist()))
         if len(pts) < 2:
             continue
+        n = int(seg[start])
         folium.PolyLine(
             pts,
-            color=COLOR_BAD if seg[start] else COLOR_OK,
+            color=COLOR_OK if n == 0 else block_color(n),
             weight=4,
             opacity=0.85,
-            tooltip="забиты сошники" if seg[start] else "без забития",
+            tooltip="без забития" if n == 0 else f"забито сошников: {n}",
         ).add_to(fmap)
 
     folium.Marker(
@@ -375,8 +401,8 @@ def main() -> None:
 
     st.title("СКИФ-48 · телеметрия сева")
     st.caption(
-        "Карта: зелёный — движение без забития сошников, красный — с забитыми. "
-        "Показатели считаются только за выбранный интервал."
+        "Карта: зелёный — движение без забития, дальше — жёлтый → красный по числу "
+        "одновременно забитых сошников. Показатели считаются только за выбранный интервал."
     )
 
     df = load_data()
@@ -503,10 +529,24 @@ def main() -> None:
     )
 
     if show_legend:
+        # Легенда повторяет шкалу карты: зелёный — без забития, дальше
+        # жёлтый → красный по числу одновременно забитых сошников.
+        # Ступеней 32, поэтому показываем полосу градиента с подписями
+        # краёв, а не набор отдельных квадратов.
+        stops = [1, 9, 17, 25, BLOCK_SCALE_MAX]
+        grad = ", ".join(
+            f"{block_color(n)} {100.0 * (n - 1) / (BLOCK_SCALE_MAX - 1):.0f}%"
+            for n in stops
+        )
         st.markdown(
-            f'<span style="color:{COLOR_OK};font-weight:700">■</span> движение без забития'
-            f' &nbsp;&nbsp;<span style="color:{COLOR_BAD};font-weight:700">■</span> '
-            f"движение с забитыми сошниками",
+            f'<span style="color:{COLOR_OK};font-weight:700">■</span> '
+            f'движение без забития'
+            f' &nbsp;&nbsp;<span style="font-size:.78rem;color:#666">'
+            f'забито сошников:</span> '
+            f'<span style="display:inline-block;width:130px;height:12px;'
+            f'vertical-align:middle;border-radius:3px;'
+            f'background:linear-gradient(90deg,{grad})"></span> '
+            f'1 … {BLOCK_SCALE_MAX}',
             unsafe_allow_html=True,
         )
 
