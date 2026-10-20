@@ -301,6 +301,23 @@ def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
     ).add_to(fmap)
 
     folium.LayerControl().add_to(fmap)
+
+    # Перед словом «Leaflet» в атрибуции рисуется сине-жёлтый прямоугольник.
+    # Это фирменный знак самой библиотеки Leaflet: он подставляется по
+    # умолчанию в ЛЮБУЮ карту на Leaflet — это не выбранный нами провайдер.
+    # Убираем его вместе со ссылкой и разделителем; обязательная подпись
+    # «© OpenStreetMap contributors» остаётся (так требует лицензия ODbL).
+    #
+    # Прячем стилями, а не JS: streamlit-folium пересобирает JS карты сам и
+    # теряет всё, что добавлено в root.script, а root.header отдаёт как есть.
+    fmap.get_root().header.add_child(folium.Element(
+        "<style>"
+        ".leaflet-control-attribution"
+        " a[title='A JavaScript library for interactive maps'],"
+        ".leaflet-control-attribution span[aria-hidden='true']"
+        " { display: none; }"
+        "</style>"
+    ))
     return fmap
 
 
