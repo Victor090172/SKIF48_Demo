@@ -16,13 +16,21 @@
 ЧТО ПОКАЗЫВАЕТ И КАК СЧИТАЕТСЯ
 --------------------------------------------------------------------------------------
 
-1. Карта: трек движения объекта. Зелёный сегмент — движение без забития
-   сошников; с забитыми — градиент от жёлтого (один забитый сошник) через
-   оранжевый к красному (все 32). Сегмент красится по состоянию в его
-   КОНЕЧНОЙ точке: забитие фиксируется в момент замера, значит участок,
-   приведший к этому замеру, и есть участок с забитыми сошниками.
-   Шкала — 32 сошника: флагов 221…224 в выгрузке 32 штуки, по одному на
-   каждый сошник машины (см. block_color).
+1. Карта: трек движения объекта, ДВА СЛОЯ раскраски (переключатель в
+   сайдбаре).
+
+   «Забитие сошников»: зелёный сегмент — движение без забития сошников;
+   с забитыми — градиент от жёлтого (один забитый сошник) через оранжевый
+   к красному (все 32). Сегмент красится по состоянию в его КОНЕЧНОЙ точке:
+   забитие фиксируется в момент замера, значит участок, приведший к этому
+   замеру, и есть участок с забитыми сошниками. Шкала — 32 сошника: флагов
+   221…224 в выгрузке 32 штуки, по одному на сошник машины (block_color).
+
+   «Отклонение нормы»: зелёный, пока модуль отклонения нормы от номинала в
+   пределах порога (5 %), дальше градиент до красного (20 %). Цвет берётся
+   по МАКСИМАЛЬНОМУ по модулю отклонению среди БУНКЕРОВ — суммарное
+   отклонение скрывает локальный сбой. В подсказке указан бункер, а в
+   попапе — строка на каждый бункер (см. rate_popup).
 
 2. Показатели за выбранный интервал:
 
@@ -31,6 +39,17 @@
    Пробег с забитием        = Σ (ΔЗабитие_на_рядок × кол-во забитых рядков)
    Доля с забитием          = Пробег с забитием / Общий пробег × 100
    Доля без забития         = 100 − Доля с забитием
+
+   Норма сева — ПО КАЖДОМУ БУНКЕРУ (три карточки на бункер, один ряд):
+
+   Средняя норма · Бункер N   = Σ ΔМасса_бN_кг / Σ ΔПлощадь_га      [кг/га]
+   Номинал · Бункер N         = площадно-взвешенное Норма_номинал_бN [кг/га]
+   Отклонение · Бункер N      = (средняя − номинал) / номинал × 100      [%]
+
+   Суммарное отклонение НЕ показывается: перелив одного дозатора и недолив
+   другого дают в сумме ноль, то есть локальный сбой остаётся незамеченным.
+   Каждая величина считается от сумм, а не усреднением построчных значений:
+   простое среднее смещено строками простоя (+14 % вместо −0,2 %).
 
    «Общий пробег» и «Пробег с забитием» оба в метро-рядках — это метраж пути,
    умноженный на число рядков. Единая размерность нужна для того, чтобы их
@@ -87,6 +106,7 @@ import colorsys
 import folium
 import numpy as np
 import pandas as pd
+import re
 import streamlit as st
 import streamlit_folium as st_folium
 
@@ -131,6 +151,42 @@ def block_color(n: int) -> str:
     r, g, b = colorsys.hls_to_rgb(h, l, s)
     return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
 
+
+def rate_color(dev: float, green: float, red: float) -> str:
+    """Цвет сегмента по отклонению динамической нормы от номинальной.
+
+    До `green` процентов — зелёный, дальше градиент зелёный → жёлтый →
+    красный, от `red` — чистый красный. Отклонение берётся по модулю:
+    недолив так же плох, как перелив.
+
+    Градиент идёт в HSL по каналу оттенка 120° → 0° (зелёный → красный,
+    середина 60° — жёлтый), как и у block_color: в RGB середина вышла бы
+    грязно-коричневой.
+    """
+    a = abs(float(dev))
+    if a <= green:
+        return COLOR_OK
+    if a >= red or red <= green:
+        return COLOR_BAD
+    t = (a - green) / (red - green)
+    h = (120.0 * (1.0 - t)) / 360.0
+    s = 1.0
+    l = 0.42 + 0.06 * t          # зелёный чуть темнее, красный чуть ярче
+    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
+
+
+def rate_level(dev: float, green: float, red: float) -> str:
+    """Уровень показателя по модулю отклонения нормы — три те же зоны,
+    что и в LEVEL_STYLE, только границы задаёт порог отклонения."""
+    a = abs(float(dev))
+    if a <= green:
+        return "хорошо"
+    if a < red:
+        return "норма"
+    return "плохо"
+
+
 # Три уровня показателя: (цвет рамки, заливка, подпись)
 LEVEL_STYLE = {
     "хорошо": ("#1a9850", "#eaf6ee"),
@@ -138,7 +194,61 @@ LEVEL_STYLE = {
     "плохо": ("#d73027", "#fbeceb"),
 }
 
+
+def rate_bucket_color(bucket: float, green: float, red: float) -> str:
+    """Цвет корзины отклонения — ровно тот, которым закрашен сегмент трека.
+
+    Корзины считаются так же, как в build_map: 0 — зелёная зона (<= green),
+    1 … RATE_STEPS — ступени внутри градиента, RATE_STEPS+1 — красная
+    (>= red), отрицательные — данных о норме нет. Цвет берётся по середине
+    диапазона корзины, поэтому полоса в легенде и счёт сегментов на карте
+    совпадают один в один.
+    """
+    if bucket < 0:
+        return "#9aa5b1"                       # нет данных о норме
+    if bucket <= 0:
+        return COLOR_OK                        # <= green
+    if bucket >= RATE_STEPS + 1:
+        return COLOR_BAD                       # >= red
+    span = max(float(red - green), 1e-9)
+    return rate_color(green + span * (bucket - 0.5) / RATE_STEPS, green, red)
+
 BLOCK_FLAG_PREFIXES = ("221_", "222_", "223_", "224_")
+
+# Ступеней раскраски по отклонению нормы. Внутри зоны градиента отклонение
+# квантуется на RATE_STEPS корзин — так трек из 49 тыс. точек превращается в
+# несколько сотен объектов, а цвета в легенде бьются со счётом сегментов.
+# Зелёная зона (<= green) и красная (>= red) — своя корзина каждая.
+RATE_STEPS = 10
+
+# Сколько карточек показателей в одном ряду. Ряд — это flex-строка
+# (см. card_row): на обычном экране шесть карточек укладываются в один
+# ряд, дальше пришлось бы листать.
+CARDS_IN_ROW = 6
+
+# Колонки нормы сева. Считаются в scripts/build_dataset.py; в CSV, собранном
+# старым скриптом, их нет — тогда соответствующие функции отключаются.
+RATE_COLS = ("Норма_номинал", "Норма_динам", "Откл_нормы", "ΔМасса_кг")
+
+# Колонки по каждому бункеру (дозатору УДПВ): `Норма_номинал_б1`,
+# `Норма_динам_б1`, `Откл_б1`, `ΔМасса_б1_кг`. build_dataset.py пишет их
+# только для НАСТРОЕННЫХ дозаторов, поэтому число бункеров приложение
+# определяет по именам колонок, а не захардкожено.
+BUNKER_RE = re.compile(r"_б(\d+)(?:_кг)?$")
+BUNKER_NOM = "Норма_номинал_б{b}"
+BUNKER_DYN = "Норма_динам_б{b}"
+BUNKER_DEV = "Откл_б{b}"
+BUNKER_MASS = "ΔМасса_б{b}_кг"
+
+
+def bunker_ids(d: pd.DataFrame) -> list[int]:
+    """Номера бункеров, по которым в наборе есть колонки (по возрастанию)."""
+    return sorted({int(m.group(1)) for c in d.columns if (m := BUNKER_RE.search(c))})
+
+# Пороги раскраски отклонения нормы по умолчанию. Пользователь задаёт их в
+# сайдбаре: до green — зелёный, от red — красный, между ними градиент.
+RATE_GREEN_DEFAULT = 5.0   # %
+RATE_RED_DEFAULT = 20.0    # %
 
 st.set_page_config(
     page_title="СКИФ-48 · телеметрия сева",
@@ -190,6 +300,38 @@ def load_data() -> pd.DataFrame:
 
     df["blocked"] = df["n_blocked"] > 0
 
+    # Норма сева: считается в scripts/build_dataset.py (см. там же формулу
+    # rev_over_poles_times_grams и окно усреднения по шагам площади).
+    # Колонок может не быть, если CSV собран старым скриптом — тогда
+    # переключатель «норма» прячется, а приложение работает как раньше.
+    have_rates = all(c in df.columns for c in RATE_COLS)
+    if have_rates:
+        for src, dst_ in (("Норма_номинал", "rate_nom"),
+                          ("Норма_динам", "rate_dyn"),
+                          ("Откл_нормы", "rate_dev")):
+            df[dst_] = pd.to_numeric(df[src], errors="coerce")
+        df["rate_mass"] = pd.to_numeric(df["ΔМасса_кг"], errors="coerce").fillna(0.0)
+        # Отклонение, у которого за спиной есть и площадь, и масса: на строках
+        # простоя динамическая норма фиктивно переносится из прошлого шага и
+        # в среднем участвовать не должна.
+        df["rate_valid"] = (df["rate_dev"].notna()
+                            & (df["d_area"] > 0) & df["rate_nom"].gt(0))
+    else:
+        for c in ("rate_nom", "rate_dyn", "rate_dev"):
+            df[c] = np.nan
+        df["rate_mass"] = 0.0
+        df["rate_valid"] = False
+
+    # Колонки по бункерам. Приводим к числам (в CSV едут как есть, но
+    # координаты мы сознательно оставляем текстом — вдруг попадётся битая).
+    # Масса без NaN: суммировать по ней надо всегда, даже если часть строк
+    # бункера не заполнена.
+    for b in bunker_ids(df):
+        df[BUNKER_MASS.format(b=b)] = pd.to_numeric(
+            df[BUNKER_MASS.format(b=b)], errors="coerce").fillna(0.0)
+        for tpl in (BUNKER_NOM, BUNKER_DYN, BUNKER_DEV):
+            df[tpl.format(b=b)] = pd.to_numeric(df[tpl.format(b=b)], errors="coerce")
+
     df = df.dropna(subset=["ts", "lat", "lon"]).sort_values("ts").reset_index(drop=True)
     return df
 
@@ -203,6 +345,44 @@ def kpis(d: pd.DataFrame) -> dict:
     blocked = float((d["d_blk_row"] * d["n_blocked"]).sum())
     area = float(d["d_area"].sum())
     pct_blocked = 100.0 * blocked / total if total > 0 else 0.0
+
+    # Норма сева. Обе величины считаются от сумм, а не усреднением
+    # построчных: средняя норма — это масса на площадь, а отклонение средней
+    # нормы от среднего номинала. Площадно-взвешенные номинал и отклонение
+    # совпадают с контрольным расчётом в build_dataset; простое среднее
+    # построчных отклонений дало бы 14 % — его смещают строки простоя, где
+    # динамическая норма перенесена из прошлого шага.
+    area_w = float(d["d_area"].sum())
+    if "rate_valid" in d.columns and area_w > 0:
+        m = float(d["rate_mass"].to_numpy().sum())
+        n_w = float((d["rate_nom"].to_numpy() * d["d_area"].to_numpy()).sum()) / area_w
+        avg_rate = m / area_w            # кг/га — как в контроле build_dataset
+        avg_nom = n_w                    # площадно-взвешенный номинал
+        # Отклонение — площадно-взвешенное среднее построчных значений:
+        # простое среднее смещено строками простоя (14 % против фактических 1.6 %)
+        ok = d["rate_valid"].to_numpy() & np.isfinite(d["rate_dev"].to_numpy())
+        if ok.any() and float(d.loc[ok, "d_area"].to_numpy().sum()) > 0:
+            w = d.loc[ok, "d_area"].to_numpy()
+            pct_rate = float((d.loc[ok, "rate_dev"].to_numpy() * w).sum() / w.sum())
+        else:
+            pct_rate = float("nan")
+    else:
+        avg_rate = avg_nom = pct_rate = float("nan")
+
+    # По каждому бункеру — те же суммы, только «своя» масса и «свой» номинал.
+    # Суммарное отклонение скрывает локальный сбой: перелив одного дозатора
+    # и недолив другого дают ноль в сумме, а здесь каждый виден отдельно.
+    bunkers = []
+    for b in bunker_ids(d):
+        m = float(d[BUNKER_MASS.format(b=b)].to_numpy().sum())
+        nom = d[BUNKER_NOM.format(b=b)].to_numpy()
+        n_w = (float((nom * d["d_area"].to_numpy()).sum()) / area_w
+               if area_w > 0 else float("nan"))
+        avg = m / area_w if area_w > 0 else float("nan")
+        dev = (100.0 * (avg - n_w) / n_w
+               if np.isfinite(n_w) and n_w > 0 else float("nan"))
+        bunkers.append({"id": b, "avg": avg, "nom": n_w, "dev": dev})
+
     return {
         "area_ha": area,
         "total_mrows": total,
@@ -210,6 +390,11 @@ def kpis(d: pd.DataFrame) -> dict:
         "pct_blocked": pct_blocked,
         "pct_clean": 100.0 - pct_blocked,
         "n_points": int(len(d)),
+        "avg_rate": avg_rate,
+        "nom_rate": avg_nom,
+        "pct_rate_dev": pct_rate,
+        "has_rate": bool(pct_rate == pct_rate),  # NaN -> False
+        "bunkers": bunkers,
     }
 
 
@@ -234,17 +419,22 @@ def grade_blockage(pct_blocked: float, red_below: float, green_above: float) -> 
 # ---------------------------------------------------------------------------
 # Карточки показателей — одна строка
 # ---------------------------------------------------------------------------
-def status_card(label: str, value: str, level: str) -> str:
+def status_card(label: str, value: str, level: str, unit: str = "") -> str:
     """Карточка с цветовой рамкой. Уровень не подписывается словом:
     цвет рамки и цифры говорят сами."""
     accent, tint = LEVEL_STYLE[level]
+    unit_html = (f" <span style='font-size:.68rem;font-weight:400;"
+                 f"color:{accent};opacity:.75'>{unit}</span>" if unit else "")
     return (
         f"<div style='flex:1 1 0;min-width:0;border:2px solid {accent};"
         f"background:{tint};border-radius:8px;padding:7px 10px'>"
-        f"<div style='font-size:.7rem;color:#555;white-space:nowrap;"
-        f"overflow:hidden;text-overflow:ellipsis'>{label}</div>"
+        # Подпись намеренно без nowrap: в ряду шесть карточек, и «Отклонение
+        # от номинальной · Бункер 1» одной строкой не помещается. min-height
+        # держит ряд ровным, когда у соседей подпись в одну строку.
+        f"<div style='font-size:.7rem;color:#555;line-height:1.25;"
+        f"min-height:2.4em;overflow:hidden'>{label}</div>"
         f"<div style='font-size:1.2rem;font-weight:700;color:{accent};"
-        f"line-height:1.25;white-space:nowrap'>{value}</div></div>"
+        f"line-height:1.25;white-space:nowrap'>{value}{unit_html}</div></div>"
     )
 
 
@@ -253,8 +443,8 @@ def plain_card(label: str, value: str, unit: str = "") -> str:
     return (
         f"<div style='flex:1 1 0;min-width:0;border:1px solid #d7dde3;"
         f"background:#fff;border-radius:8px;padding:7px 10px'>"
-        f"<div style='font-size:.7rem;color:#555;white-space:nowrap;"
-        f"overflow:hidden;text-overflow:ellipsis'>{label}</div>"
+        f"<div style='font-size:.7rem;color:#555;line-height:1.25;"
+        f"min-height:2.4em;overflow:hidden'>{label}</div>"
         f"<div style='font-size:1.05rem;font-weight:600;color:#1f2933;"
         f"line-height:1.4;white-space:nowrap'>{value} "
         f"<span style='font-size:.68rem;font-weight:400;color:#777'>{unit}</span></div></div>"
@@ -273,8 +463,53 @@ def card_row(*cards: str) -> str:
 # ---------------------------------------------------------------------------
 # Карта
 # ---------------------------------------------------------------------------
-def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
-    """Карта с треком: зелёный — без забития, дальше жёлтый → красный."""
+def rate_popup(per_b: dict, sdev: np.ndarray, svom: np.ndarray, sdyn: np.ndarray,
+               i: int, focus: int) -> str:
+    """Всплывающее окно нормы сева на ломаной трека.
+
+    По строке на каждый бункер: своя динамическая норма против своего
+    номинала и своё отклонение. Суммарную цифру не показываем — она как
+    раз и скрывает локальный сбой. `focus` — бункер, чьим отклонением
+    покрашен сегмент: его строка идёт первой, чтобы читать вместе с цветом.
+
+    Если колонок по бункерам нет (CSV собран старым скриптом) — одна
+    сводная строка, как в первой версии окна.
+    """
+    rows = ["<b>Норма сева</b>"]
+    if per_b:
+        for b in sorted(per_b, key=lambda x: (x != focus, x)):
+            s = per_b[b]
+            rows.append(
+                f"Бункер {b}: <b>{s['dyn'][i]:.2f}</b> из {s['nom'][i]:.2f} кг/га "
+                f"— отклонение <b>{s['dev'][i]:+.2f} %</b>"
+            )
+    else:
+        rows.append(f"Номинальная: <b>{svom[i]:.2f}</b> кг/га")
+        rows.append(f"Динамическая: <b>{sdyn[i]:.2f}</b> кг/га")
+        rows.append(f"Отклонение: <b>{sdev[i]:+.2f} %</b>")
+    return (
+        "<div style='font-family:sans-serif;font-size:13px;line-height:1.5'>"
+        + "<br>".join(rows)
+        + "</div>"
+    )
+
+
+def build_map(d: pd.DataFrame, simplify_m: float, mode: str = "blockage",
+              green: float = RATE_GREEN_DEFAULT,
+              red: float = RATE_RED_DEFAULT) -> folium.Map:
+    """Карта с треком в двух режимах раскраски.
+
+    mode="blockage" — зелёный без забития, дальше жёлтый → красный по числу
+    одновременно забитых сошников.
+    mode="rate" — зелёный в пределах порога отклонения нормы, дальше
+    градиент зелёный → жёлтый → красный. Цвет сегмента определяет
+    максимальное по модулю отклонение среди БУНКЕРОВ: так виден локальный
+    сбой, который в сумме скрывает недолив другого дозатора. Всплывающее
+    окно — по строке на каждый бункер (своя норма и своё отклонение).
+
+    Оба режима рисуют ОДИН трек, но разными слоями: переключение — это
+    смена слоя, а не наложение двух треков друг на друга.
+    """
     center = [float(d["lat"].mean()), float(d["lon"].mean())]
     fmap = folium.Map(location=center, zoom_start=14, tiles="OpenStreetMap",
                       control_scale=True)
@@ -284,9 +519,50 @@ def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
 
     lat = d["lat"].to_numpy()
     lon = d["lon"].to_numpy()
-    # Число одновременно забитых сошников: пофакторные флаги 221…224 дают
-    # целые 0…4. От него зависит цвет сегмента.
-    n_blk = d["n_blocked"].to_numpy().astype(int)
+
+    use_rate = mode == "rate" and (
+        bool(bunker_ids(d))
+        or ("rate_dev" in d.columns and d["rate_dev"].notna().any())
+    )
+
+    if use_rate:
+        ids = bunker_ids(d)
+        # Цвет сегмента — по максимальному по модулю отклонению среди
+        # БУНКЕРОВ: так на треке виден локальный сбой, который в сумме
+        # скрывает недолив другого дозатора (перелив одного и недолив
+        # другого дают ноль). Если бункеров в наборе нет — сводное
+        # отклонение, как раньше.
+        if ids:
+            arr = np.stack([d[BUNKER_DEV.format(b=b)].to_numpy(dtype=float)
+                            for b in ids])
+            mag = np.where(np.isnan(arr), -np.inf, np.abs(arr))
+            has = np.isfinite(mag).any(axis=0)
+            pick = np.argmax(mag, axis=0)
+            rows = np.arange(arr.shape[1])
+            dev = np.where(has, arr[pick, rows], np.nan)
+            src = np.where(has, np.asarray(ids, dtype=int)[pick], 0)
+        else:
+            dev = d["rate_dev"].to_numpy(dtype=float)
+            src = np.zeros(len(d), dtype=int)
+
+        # Квантуем отклонение не в абсолютные значения, а в КОРЗИНЫ по
+        # порогам: своя корзина для зелёной зоны, RATE_STEPS корзин внутри
+        # градиента, своя для красной. Иначе зелёная зона в 0.5 % (в ней
+        # подавляющее большинство точек) рассыпалась бы на кучу разных ключей
+        # и не склеивалась в ломаные, а цвет перестал бы совпадать с легендой.
+        a = np.abs(dev)
+        span = max(float(red - green), 1e-9)
+        g_ok, g_bad = 0.0, float(RATE_STEPS + 1)
+        key = np.where(
+            ~np.isfinite(a), -1.0,
+            np.where(a <= green, g_ok,
+                     np.where(a >= red, g_bad,
+                              1.0 + np.floor((a - green) / span * RATE_STEPS))),
+        )
+    else:
+        # Число одновременно забитых сошников: пофакторные флаги 221…224 дают
+        # целые 0…32. От него зависит цвет сегмента.
+        key = d["n_blocked"].to_numpy().astype(float)
 
     # Прореживание: оставляем точку, только если она ушла от последней
     # сохранённой дальше чем на simplify_m. Геометрия трека не меняется.
@@ -298,9 +574,29 @@ def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
         keep[-1] = True
 
     idx = np.flatnonzero(keep)
-    slat, slon, snb = lat[idx], lon[idx], n_blk[idx]
+    slat, slon = lat[idx], lon[idx]
+    sk = key[idx]
+    if use_rate:
+        sdev, ssrc = dev[idx], src[idx]
+        # Для попапа — срезы по каждому бункеру: там показываем свой номинал,
+        # свою динамическую норму и своё отклонение, а не сводные цифры.
+        per_b = {
+            b: {
+                "nom": d[BUNKER_NOM.format(b=b)].to_numpy(dtype=float)[idx],
+                "dyn": d[BUNKER_DYN.format(b=b)].to_numpy(dtype=float)[idx],
+                "dev": d[BUNKER_DEV.format(b=b)].to_numpy(dtype=float)[idx],
+            }
+            for b in bunker_ids(d)
+        }
+        # Сводные номинал и динамическая норма — в попап они идут, только
+        # когда колонок по бункерам в наборе нет (CSV собран старым
+        # скриптом), в остальных случаях строки идут по бункерам.
+        svom = (d["rate_nom"].to_numpy(dtype=float)[idx]
+                if "rate_nom" in d.columns else np.full(len(idx), np.nan))
+        sdyn = (d["rate_dyn"].to_numpy(dtype=float)[idx]
+                if "rate_dyn" in d.columns else np.full(len(idx), np.nan))
 
-    seg = snb[1:]  # цвет сегмента определяется его концом
+    seg = sk[1:]  # цвет сегмента определяется его концом
     if len(seg) == 0:
         return fmap
 
@@ -311,14 +607,40 @@ def build_map(d: pd.DataFrame, simplify_m: float) -> folium.Map:
         pts = list(zip(slat[start:stop + 1].tolist(), slon[start:stop + 1].tolist()))
         if len(pts) < 2:
             continue
-        n = int(seg[start])
-        folium.PolyLine(
+        k = seg[start]
+        if use_rate:
+            if k < 0:
+                # норма на этом отрезке не определена — рисуем нейтрально,
+                # в раскраску по отклонению она не участвует
+                color, tip, popup = "#9aa5b1", "нет данных о норме", None
+            else:
+                # в попапе — значения на середине сегмента, не на его краю:
+                # так цифра ближе к тому, что показано цветом
+                mid = (start + stop) // 2
+                color = rate_bucket_color(k, green, red)
+                # Кто дал цвет сегменту: если выбран конкретный бункер,
+                # называем его и в подсказке — иначе непонятно, к чему
+                # относится выделенный красным участок.
+                b = int(ssrc[mid])
+                tip = (f"Бункер {b}: отклонение {sdev[mid]:+.1f} %"
+                       if b else f"отклонение {sdev[mid]:+.1f} %")
+                popup = rate_popup(per_b, sdev, svom, sdyn, mid, b)
+        else:
+            n = int(k)
+            color = COLOR_OK if n == 0 else block_color(n)
+            tip = "без забития" if n == 0 else f"забито сошников: {n}"
+            popup = None
+
+        pl = folium.PolyLine(
             pts,
-            color=COLOR_OK if n == 0 else block_color(n),
+            color=color,
             weight=4,
             opacity=0.85,
-            tooltip="без забития" if n == 0 else f"забито сошников: {n}",
-        ).add_to(fmap)
+            tooltip=tip,
+        )
+        if popup:
+            pl.add_child(folium.Popup(popup, max_width=280))
+        pl.add_to(fmap)
 
     folium.Marker(
         [slat[0], slon[0]], tooltip="Старт",
@@ -406,8 +728,10 @@ def main() -> None:
 
     st.title("СКИФ-48 · телеметрия сева")
     st.caption(
-        "Карта: зелёный — движение без забития, дальше — жёлтый → красный по числу "
-        "одновременно забитых сошников. Показатели считаются только за выбранный интервал."
+        "Карта в двух слоях: «Забитие сошников» — зелёный без забития, дальше "
+        "жёлтый → красный по числу одновременно забитых; «Отклонение нормы» — "
+        "зелёный в пределах порога, дальше градиент до красного. Слой выбирается "
+        "в сайдбаре. Показатели считаются только за выбранный интервал."
     )
 
     df = load_data()
@@ -497,6 +821,56 @@ def main() -> None:
             "Прореживание точек, м", 0, 50, 3, 1,
             help="0 — рисовать каждую точку. Больше — легче карта, форма трека та же.",
         )
+
+        # Переключатель слоя раскраски. «Норма» показывается только когда в
+        # наборе есть колонки нормы — иначе пункт вёл бы в пустой трек.
+        # Проверка наличия колонки обязательна: load_data кладёт rate_dev и
+        # в пустом виде (NaN), но полагаться на это — полагаться на порядок
+        # кода в другом месте файла.
+        has_rate = bool("rate_dev" in df.columns
+                        and df["rate_dev"].notna().any())
+        if has_rate:
+            layer = st.segmented_control(
+                "Слой раскраски", ["Забитие сошников", "Отклонение нормы"],
+                key="map_layer", label_visibility="collapsed", width="stretch",
+            )
+            mode = "rate" if layer == "Отклонение нормы" else "blockage"
+        else:
+            layer, mode = None, "blockage"
+            st.caption("Колонок нормы сева в наборе нет — доступна только раскраска по забитию.")
+
+        if mode == "rate":
+            st.caption(
+                "Пороги отклонения динамической нормы от номинальной. "
+                "Отклонение берётся по модулю: недолив так же плох, как перелив."
+            )
+            r_green = st.number_input(
+                "Зелёный: отклонение до (%)", 0.0, 500.0,
+                RATE_GREEN_DEFAULT, 0.5,
+                key="rate_green",
+                help="Модуль отклонения не выше этого значения — зелёный.",
+            )
+            r_red = st.number_input(
+                "Красный: отклонение от (%)", 0.0, 500.0,
+                RATE_RED_DEFAULT, 0.5,
+                key="rate_red",
+                help="С этого значения — чистый красный, между порогами градиент.",
+            )
+            if r_red <= r_green:
+                st.warning("Красный порог должен быть ВЫШЕ зелёного, иначе градиенту негде развернуться.")
+                r_red = r_green + 0.5
+            st.markdown(
+                f"<div style='font-size:.78rem;line-height:1.7;color:#555'>"
+                f"<span style='color:{COLOR_OK};font-weight:700'>■</span> ≤ {r_green:g} % "
+                f"&nbsp;<span style='color:#e6a700;font-weight:700'>■</span> "
+                f"{r_green:g}–{r_red:g} % "
+                f"&nbsp;<span style='color:{COLOR_BAD};font-weight:700'>■</span> &gt; {r_red:g} %"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            r_green, r_red = RATE_GREEN_DEFAULT, RATE_RED_DEFAULT
+
         show_legend = st.checkbox("Показывать легенду", value=True)
 
     # --- срез ---------------------------------------------------------------
@@ -522,6 +896,40 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    # Норма сева — ПО КАЖДОМУ БУНКЕРУ отдельно. Суммарное отклонение скрывает
+    # локальный сбой: перелив одного дозатора и недолив другого дают ноль
+    # в сумме, а по бункерам каждый виден. По три карточки на бункер
+    # (средняя норма, номинал, отклонение); при двух бункерах это ровно
+    # один ряд. Больше двух бункеров — ряды по CARDS_IN_ROW.
+    bunkers = k["bunkers"]
+    if bunkers:
+        per_row = max(1, CARDS_IN_ROW // 3)
+        for start in range(0, len(bunkers), per_row):
+            cards = []
+            for b in bunkers[start:start + per_row]:
+                finite = np.isfinite(b["dev"])
+                lvl = rate_level(b["dev"], r_green, r_red) if finite else "норма"
+                n = b["id"]
+                avg_t = f"{b['avg']:,.2f}" if np.isfinite(b["avg"]) else "—"
+                nom_t = f"{b['nom']:,.2f}" if np.isfinite(b["nom"]) else "—"
+                dev_t = f"{b['dev']:+.2f} %" if finite else "—"
+                cards.append(status_card(f"Средняя норма сева<br>Бункер {n}",
+                                         avg_t, lvl, "кг/га"))
+                cards.append(plain_card(f"Номинальная норма<br>Бункер {n}",
+                                        nom_t, "кг/га"))
+                cards.append(status_card(f"Отклонение от номинальной<br>Бункер {n}",
+                                         dev_t, lvl))
+            st.markdown(card_row(*cards), unsafe_allow_html=True)
+
+        st.caption(
+            "Норма: "
+            + " · ".join(
+                f"Бункер {b['id']} — {b['avg']:,.2f} из {b['nom']:,.2f} кг/га "
+                f"({b['dev']:+.2f} %)"
+                for b in bunkers if np.isfinite(b["dev"])
+            )
+        )
+
     st.caption(
         f"Выбрано: {pd.Timestamp(sel_from):%d.%m.%Y %H:%M} — "
         f"{pd.Timestamp(sel_to):%d.%m.%Y %H:%M} · "
@@ -529,31 +937,59 @@ def main() -> None:
     )
 
     st_folium.st_folium(
-        build_map(d, float(simplify)),
+        build_map(d, float(simplify), mode=mode, green=r_green, red=r_red),
         width=None, height=620, use_container_width=True,
     )
 
     if show_legend:
-        # Легенда повторяет шкалу карты: зелёный — без забития, дальше
-        # жёлтый → красный по числу одновременно забитых сошников.
-        # Ступеней 32, поэтому показываем полосу градиента с подписями
-        # краёв, а не набор отдельных квадратов.
-        stops = [1, 9, 17, 25, BLOCK_SCALE_MAX]
-        grad = ", ".join(
-            f"{block_color(n)} {100.0 * (n - 1) / (BLOCK_SCALE_MAX - 1):.0f}%"
-            for n in stops
-        )
-        st.markdown(
-            f'<span style="color:{COLOR_OK};font-weight:700">■</span> '
-            f'движение без забития'
-            f' &nbsp;&nbsp;<span style="font-size:.78rem;color:#666">'
-            f'забито сошников:</span> '
-            f'<span style="display:inline-block;width:130px;height:12px;'
-            f'vertical-align:middle;border-radius:3px;'
-            f'background:linear-gradient(90deg,{grad})"></span> '
-            f'1 … {BLOCK_SCALE_MAX}',
-            unsafe_allow_html=True,
-        )
+        if mode == "rate":
+            # Легенда слоя «Отклонение нормы»: те же корзины и те же цвета,
+            # которыми закрашен трек (см. rate_bucket_color). Ось полосы
+            # идёт от 0 до red + (red − green): зелёная зона укладывается
+            # в начало, а красная имеет заметный хвост, а не схлопывается
+            # в нулевую ширину на самом краю.
+            axis = r_red + (r_red - r_green) if r_red > r_green else max(r_red, 1.0)
+            grad_parts = [f"{COLOR_OK} 0%",
+                          f"{COLOR_OK} {100.0 * r_green / axis:.0f}%"]
+            for bk in range(1, RATE_STEPS + 1):
+                pos = r_green + (r_red - r_green) * (bk - 0.5) / RATE_STEPS
+                grad_parts.append(
+                    f"{rate_bucket_color(bk, r_green, r_red)} {100.0 * pos / axis:.0f}%")
+            grad_parts.append(f"{COLOR_BAD} {100.0 * r_red / axis:.0f}%")
+            grad_parts.append(f"{COLOR_BAD} 100%")
+            grad = ", ".join(grad_parts)
+            st.markdown(
+                f'<span style="color:{COLOR_OK};font-weight:700">■</span> '
+                f'≤ {r_green:g} %'
+                f' &nbsp;&nbsp;<span style="font-size:.78rem;color:#666">'
+                f'модуль отклонения нормы:</span> '
+                f'<span style="display:inline-block;width:130px;height:12px;'
+                f'vertical-align:middle;border-radius:3px;'
+                f'background:linear-gradient(90deg,{grad})"></span> '
+                f'≥ {r_red:g} %',
+                unsafe_allow_html=True,
+            )
+        else:
+            # Легенда слоя «Забитие сошников»: зелёный — без забития, дальше
+            # жёлтый → красный по числу одновременно забитых сошников.
+            # Ступеней 32, поэтому показываем полосу градиента с подписями
+            # краёв, а не набор отдельных квадратов.
+            stops = [1, 9, 17, 25, BLOCK_SCALE_MAX]
+            grad = ", ".join(
+                f"{block_color(n)} {100.0 * (n - 1) / (BLOCK_SCALE_MAX - 1):.0f}%"
+                for n in stops
+            )
+            st.markdown(
+                f'<span style="color:{COLOR_OK};font-weight:700">■</span> '
+                f'движение без забития'
+                f' &nbsp;&nbsp;<span style="font-size:.78rem;color:#666">'
+                f'забито сошников:</span> '
+                f'<span style="display:inline-block;width:130px;height:12px;'
+                f'vertical-align:middle;border-radius:3px;'
+                f'background:linear-gradient(90deg,{grad})"></span> '
+                f'1 … {BLOCK_SCALE_MAX}',
+                unsafe_allow_html=True,
+            )
 
 
 if __name__ == "__main__":
